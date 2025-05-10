@@ -1,0 +1,6 @@
+fastapi>=0.68.0
+uvicorn>=0.15.0
+scikit-learn==1.2.2  # Pinned version
+numpy==1.23.5        # Compatible version
+joblib>=1.1.0
+pydantic>=1.8.0

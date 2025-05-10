@@ -1,0 +1,48 @@
+name: Destroy GCP Infra
+
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: terraform-inf
+  REGION: us-central1
+  REPO_NAME: docker-repo
+  IMAGE_NAME: iris-api
+  SERVICE_ACCOUNT: terraform-gcp-pipeline@terraform-inf.iam.gserviceaccount.com
+
+jobs:
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        project_id: ${{ env.PROJECT_ID }}
+        export_default_credentials: true
+
+    - name: Terraform Init
+      run: |
+        terraform init -reconfigure \
+          -backend-config="bucket=gcp-state-terraform" \
+          -backend-config="prefix=terraform/state"
+
+    - name: Terraform Destroy
+      run: |
+        terraform destroy -auto-approve \
+          -var="project_id=${PROJECT_ID}" \
+          -var="service_account_email=${SERVICE_ACCOUNT}"
+
+    - name: Delete Docker Image (optional)
+      run: |
+        IMAGE_PATH="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
+        if gcloud artifacts docker images list ${IMAGE_PATH} --include-tags --quiet >/dev/null 2>&1; then
+          gcloud artifacts docker images delete ${IMAGE_PATH}:latest --quiet
+        else
+          echo -e "\033[1;33mImage not found, skipping delete.\033[0m"
+        fi
