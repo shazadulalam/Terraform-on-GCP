@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT }}  # Ensure this is correctly set
   REGION: us-central1
   REPO_NAME: docker-repo
   IMAGE_NAME: iris-api
@@ -27,6 +27,7 @@ jobs:
 
     - name: Set GCP project
       run: |
+        echo "Setting project to ${{ secrets.GCP_PROJECT }}"
         gcloud config set project ${{ secrets.GCP_PROJECT }}  # Correctly set project ID
 
     - name: Enable required GCP services
