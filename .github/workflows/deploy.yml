@@ -58,10 +58,11 @@ jobs:
     - name: Terraform Init and Apply
       run: |
         terraform init -reconfigure \
-          -backend-config="bucket=gcp-state-terraform" \
-          -backend-config="prefix=terraform/state"
-
+        -backend-config="bucket=gcp-state-terraform" \
+        -backend-config="prefix=terraform/state"
+    
         terraform apply -auto-approve \
-          -var="project_id=${PROJECT_ID}" \
-          -var="location=${REGION}" \
-          -var="service_account_email=terraform-gcp-pipeline@${PROJECT_ID}.iam.gserviceaccount.com"
+        -var="project_id=${PROJECT_ID}" \
+        -var="service_account_email=terraform-gcp-pipeline@${PROJECT_ID}.iam.gserviceaccount.com" \
+        -var="backend_bucket=gcp-state-terraform"
+    
