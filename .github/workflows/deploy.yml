@@ -25,6 +25,10 @@ jobs:
         service_account_key: ${{ secrets.GCP_SA_KEY }}  # Service Account key secret
         project_id: ${{ secrets.GCP_PROJECT }}
 
+    - name: Set GCP project
+      run: |
+        gcloud config set project ${{ secrets.GCP_PROJECT }}  # Set project explicitly
+
     - name: Enable required GCP services
       run: |
         gcloud services enable \
@@ -51,4 +55,3 @@ jobs:
         terraform apply -auto-approve \
           -var="project_id=${PROJECT_ID}" \
           -var="service_account_email=terraform-gcp-pipeline@${PROJECT_ID}.iam.gserviceaccount.com"
-
