@@ -50,9 +50,11 @@ jobs:
         docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest .
         docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest
 
+        
     - name: Terraform Apply
       run: |
         terraform init -backend-config="bucket=gcp-state-terraform"
         terraform apply -auto-approve \
           -var="project_id=${PROJECT_ID}" \
           -var="service_account_email=terraform-gcp-pipeline@${PROJECT_ID}.iam.gserviceaccount.com"
+
