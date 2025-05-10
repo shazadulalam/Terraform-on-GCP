@@ -27,7 +27,7 @@ jobs:
 
     - name: Set GCP project
       run: |
-        gcloud config set project ${{ secrets.GCP_PROJECT }}  # Set project explicitly
+        gcloud config set project ${{ secrets.GCP_PROJECT }}  # Correctly set project ID
 
     - name: Enable required GCP services
       run: |
