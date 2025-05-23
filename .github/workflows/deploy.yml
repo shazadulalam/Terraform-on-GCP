@@ -1,42 +1,55 @@
-name: Terraform CI/CD
+name: Terraform CI/CD - Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main] # Or your deployment branch
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT }}
-  REGION: us-central1
-  REPO_NAME: docker-repo
-  IMAGE_NAME: iris-api
+  # PROJECT_ID is sourced from secrets.GCP_PROJECT_ID in job steps
+  # These can be defined here if they are fixed and not in secrets,
+  # or overridden by secrets in specific steps.
+  GCP_REGION: us-central1 # Default region
+  DOCKER_REPO_NAME: docker-repo # Default repo name
+  IMAGE_NAME: iris-api # Default image name
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production
+    # environment: production # Optional: Define a GitHub environment for protection rules and secrets
+    name: Deploy to GCP
+
+    permissions:
+      contents: 'read' # Allow checkout of the repository
+      id-token: 'write' # Allow OIDC token generation for Workload Identity Federation
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Authenticate to GCP
-      uses: google-github-actions/auth@v1
+    - name: Authenticate to GCP using Workload Identity Federation
+      id: auth
+      uses: google-github-actions/auth@v2
       with:
-        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+        # The Workload Identity Provider resource name.
+        # Format: projects/{project-number}/locations/global/workloadIdentityPools/{pool-id}/providers/{provider-id}
+        workload_identity_provider: 'projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ secrets.GCP_WIF_POOL_ID }}/providers/${{ secrets.GCP_WIF_PROVIDER_ID }}'
+        # The service account to impersonate.
+        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}'
 
     - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
+      uses: google-github-actions/setup-gcloud@v2
       with:
-        project_id: ${{ secrets.GCP_PROJECT }}
+        project_id: ${{ secrets.GCP_PROJECT_ID }} # Explicitly set project for gcloud commands
 
     - name: Install Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: 1.6.6
+        terraform_version: 1.6.6 # Specify desired Terraform version
 
     - name: Enable Required APIs
+      # Enables GCP services necessary for the deployment.
+      # Idempotent operation: does nothing if APIs are already enabled.
       run: |
-        gcloud config set project ${{ secrets.GCP_PROJECT }}
         gcloud services enable \
           artifactregistry.googleapis.com \
           run.googleapis.com \
@@ -45,24 +58,117 @@ jobs:
           bigquery.googleapis.com \
           compute.googleapis.com \
           monitoring.googleapis.com \
-          serviceusage.googleapis.com
+          serviceusage.googleapis.com \
+          cloudresourcemanager.googleapis.com \
+          iam.googleapis.com \
+          --project=${{ secrets.GCP_PROJECT_ID }}
 
     - name: Build and Push Docker Image
+      # This step runs from the root of the repository.
+      # The Dockerfile is expected to be in ./api/
       run: |
-        cd api
-        gcloud auth configure-docker ${REGION}-docker.pkg.dev
-        docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest .
-        docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest
-        cd ..
+        set -e # Fail fast on errors
+        echo "Building Docker image from context ./api ..."
+        gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --project=${{ secrets.GCP_PROJECT_ID }}
+        docker build -t "${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest" ./api
+        echo "Pushing Docker image to Artifact Registry..."
+        docker push "${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+      env:
+        # Use secrets if available, otherwise fall back to global env vars
+        GCP_REGION: ${{ secrets.GCP_REGION || env.GCP_REGION }}
+        DOCKER_REPO_NAME: ${{ secrets.DOCKER_REPO_NAME || env.DOCKER_REPO_NAME }}
+        IMAGE_NAME: ${{ secrets.IMAGE_NAME || env.IMAGE_NAME }}
 
-    - name: Terraform Init and Apply
+    - name: Create Terraform .tfvars file
+      working-directory: ./terraform
       run: |
-        terraform init -reconfigure \
-        -backend-config="bucket=gcp-state-terraform" \
-        -backend-config="prefix=terraform/state"
-    
-        terraform apply -auto-approve \
-        -var="project_id=${PROJECT_ID}" \
-        -var="service_account_email=terraform-gcp-pipeline@${PROJECT_ID}.iam.gserviceaccount.com" \
-        -var="backend_bucket=gcp-state-terraform"
+        set -e # Fail fast on errors
+        echo "Creating terraform.tfvars file with dynamic values..."
+        # This file provides variable inputs to Terraform.
+        # Secrets should be used for sensitive values.
+        # Environment variables (env) from the workflow or defaults are used for non-sensitive configurations.
+
+        echo "project_id = \"${{ secrets.GCP_PROJECT_ID }}\"" > terraform.tfvars
+        echo "region = \"${{ env.GCP_REGION }}\"" >> terraform.tfvars
+        echo "location = \"${{ secrets.GCP_LOCATION || env.GCP_LOCATION || 'US' }}\"" >> terraform.tfvars
+        echo "service_account_email = \"${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}\"" >> terraform.tfvars
+        
+        # Construct container_image URI using other env vars/secrets
+        CONTAINER_IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+        echo "container_image = \"${CONTAINER_IMAGE_URI}\"" >> terraform.tfvars
+        
+        echo "dataset_id = \"${{ secrets.BQ_DATASET_ID || 'iris_dataset_prod' }}\"" >> terraform.tfvars
+        echo "cloud_run_service_name = \"${{ env.IMAGE_NAME }}-prod\"" >> terraform.tfvars # Consider making 'prod' suffix configurable
+        echo "repository_name = \"${{ env.DOCKER_REPO_NAME }}\"" >> terraform.tfvars
+        
+        # Add other variables from terraform/variables.tf as needed.
+        # Example: echo "my_variable = \"${{ secrets.MY_SECRET_VARIABLE || 'default_value' }}\"" >> terraform.tfvars
+        
+        echo "Contents of terraform.tfvars:"
+        cat terraform.tfvars
+      env:
+        # Use secrets if available, otherwise fall back to global env vars
+        GCP_REGION: ${{ secrets.GCP_REGION || env.GCP_REGION }}
+        DOCKER_REPO_NAME: ${{ secrets.DOCKER_REPO_NAME || env.DOCKER_REPO_NAME }}
+        IMAGE_NAME: ${{ secrets.IMAGE_NAME || env.IMAGE_NAME }}
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      # Initialize Terraform, configuring the backend (e.g., GCS bucket for state).
+      # -reconfigure is used in case backend configuration has changed.
+      run: terraform init -reconfigure
+
+    - name: Terraform Validate
+      working-directory: ./terraform
+      # Validate the Terraform configuration for syntax and consistency.
+      run: terraform validate
+
+    - name: Terraform Plan
+      working-directory: ./terraform
+      # Generate an execution plan and save it to a file.
+      # This plan shows what actions Terraform will take.
+      run: terraform plan -out=tfplan
+
+    - name: Upload Terraform Plan Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: ./terraform/tfplan
+        if-no-files-found: error # Ensure the plan file was created
+
+    - name: Terraform Apply
+      working-directory: ./terraform
+      # Apply the changes defined in the Terraform plan.
+      # -auto-approve is used here as changes are reviewed via PRs or implicitly by pushing to main.
+      # For more control, a manual approval step could be added after 'plan'.
+      run: terraform apply -auto-approve tfplan
+
+    # Optional: Add a step to output Cloud Run service URL
+    - name: Get Cloud Run Service URL
+      id: get_url
+      if: success() # Only run if previous steps were successful
+      working-directory: ./terraform
+      run: |
+        set -e # Fail fast if terraform output fails
+        # Attempt to get the Cloud Run service URL from Terraform outputs.
+        # This assumes an output named 'cloud_run_service_url' is defined in your Terraform configuration.
+        SERVICE_URL=$(terraform output -raw cloud_run_service_url 2>/dev/null || echo "not-found")
+        echo "Raw SERVICE_URL output: $SERVICE_URL" # For debugging
+        if [[ "$SERVICE_URL" == "not-found" || -z "$SERVICE_URL" ]]; then
+          echo "service_url=not-found" >> $GITHUB_OUTPUT
+          echo "Warning: Cloud Run service URL not found in Terraform outputs."
+        else
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+        fi
+      # Example output definition in Terraform (e.g., terraform/main.tf or a module's outputs.tf):
+      # output "cloud_run_service_url" {
+      #   description = "URL of the deployed Cloud Run service"
+      #   value       = module.cloudrun.service_url # Actual reference depends on your module structure
+      # }
+
+    - name: Display Cloud Run URL
+      # Display the Cloud Run URL if it was successfully retrieved.
+      if: steps.get_url.outputs.service_url != 'not-found'
+      run: |
+        echo "Cloud Run Service URL: ${{ steps.get_url.outputs.service_url }}"
     
