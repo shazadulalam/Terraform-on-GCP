@@ -1,48 +1,128 @@
-name: Destroy GCP Infra
+name: Terraform CI/CD - Destroy
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Manual trigger
 
 env:
-  PROJECT_ID: terraform-inf
-  REGION: us-central1
-  REPO_NAME: docker-repo
-  IMAGE_NAME: iris-api
-  SERVICE_ACCOUNT: terraform-gcp-pipeline@terraform-inf.iam.gserviceaccount.com
+  # PROJECT_ID is sourced from secrets.GCP_PROJECT_ID in job steps
+  GCP_REGION: us-central1 # Default region, override with secrets if needed
+  DOCKER_REPO_NAME: docker-repo # Default repo name
+  IMAGE_NAME: iris-api # Default image name
 
 jobs:
   destroy:
-    name: Terraform Destroy
+    name: Terraform Destroy Infrastructure
     runs-on: ubuntu-latest
+    # environment: production # Optional: Define a GitHub environment for protection rules and secrets
+    name: Terraform Destroy Infrastructure
+
+    permissions:
+      contents: 'read' # Allow checkout of the repository
+      id-token: 'write' # Allow OIDC token generation for Workload Identity Federation
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Set up Google Cloud CLI
-      uses: google-github-actions/setup-gcloud@v1
+    - name: Authenticate to GCP using Workload Identity Federation
+      id: auth
+      uses: google-github-actions/auth@v2
       with:
-        service_account_key: ${{ secrets.GCP_SA_KEY }}
-        project_id: ${{ env.PROJECT_ID }}
-        export_default_credentials: true
+        # The Workload Identity Provider resource name.
+        workload_identity_provider: 'projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ secrets.GCP_WIF_POOL_ID }}/providers/${{ secrets.GCP_WIF_PROVIDER_ID }}'
+        # The service account to impersonate. Must have permissions to destroy resources.
+        service_account: '${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}'
 
-    - name: Terraform Init
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }} # Explicitly set project for gcloud commands
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.6 # Specify desired Terraform version
+
+    # Optional: Enable APIs if destroy operations require them (usually not, but good for consistency).
+    # For 'destroy', this is less critical than for 'deploy'.
+    - name: Enable APIs for gcloud commands (if needed)
       run: |
-        terraform init -reconfigure \
-          -backend-config="bucket=gcp-state-terraform" \
-          -backend-config="prefix=terraform/state"
+        gcloud services enable \
+          artifactregistry.googleapis.com \
+          run.googleapis.com \
+          # Add other APIs if specific gcloud commands in this workflow need them
+          --project=${{ secrets.GCP_PROJECT_ID }}
+
+    - name: Create Terraform .tfvars file for Destroy
+      working-directory: ./terraform
+      run: |
+        set -e # Fail fast on errors
+        echo "Creating terraform.tfvars for destroy operation..."
+        # This ensures Terraform uses the same variable values as during deployment
+        # for identifying resources to destroy.
+
+        echo "project_id = \"${{ secrets.GCP_PROJECT_ID }}\"" > terraform.tfvars
+        echo "region = \"${{ env.GCP_REGION }}\"" >> terraform.tfvars
+        echo "location = \"${{ secrets.GCP_LOCATION || env.GCP_LOCATION || 'US' }}\"" >> terraform.tfvars
+        echo "service_account_email = \"${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}\"" >> terraform.tfvars
+        
+        # Construct container_image URI to match what was deployed
+        CONTAINER_IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO_NAME }}/${{ env.IMAGE_NAME }}:latest"
+        echo "container_image = \"${CONTAINER_IMAGE_URI}\"" >> terraform.tfvars
+        
+        echo "dataset_id = \"${{ secrets.BQ_DATASET_ID || 'iris_dataset_prod' }}\"" >> terraform.tfvars
+        echo "cloud_run_service_name = \"${{ env.IMAGE_NAME }}-prod\"" >> terraform.tfvars # Consider making 'prod' suffix configurable
+        echo "repository_name = \"${{ env.DOCKER_REPO_NAME }}\"" >> terraform.tfvars
+        
+        # Add any other variables from terraform/variables.tf that are crucial for identifying resources.
+        
+        echo "Contents of terraform.tfvars for destroy:"
+        cat terraform.tfvars
+      env:
+        GCP_REGION: ${{ secrets.GCP_REGION || env.GCP_REGION }}
+        DOCKER_REPO_NAME: ${{ secrets.DOCKER_REPO_NAME || env.DOCKER_REPO_NAME }}
+        IMAGE_NAME: ${{ secrets.IMAGE_NAME || env.IMAGE_NAME }}
+
+    - name: Terraform Init for Destroy
+      working-directory: ./terraform
+      # Initialize Terraform for the destroy operation.
+      run: terraform init -reconfigure
 
     - name: Terraform Destroy
-      run: |
-        terraform destroy -auto-approve \
-          -var="project_id=${PROJECT_ID}" \
-          -var="service_account_email=${SERVICE_ACCOUNT}"
+      working-directory: ./terraform
+      # Destroy all resources defined in the Terraform configuration.
+      # -auto-approve is used to prevent interactive prompts.
+      run: terraform destroy -auto-approve
 
-    - name: Delete Docker Image (optional)
+    - name: Delete Docker Image from Artifact Registry (Optional)
+      # This step runs from the root of the repository.
+      # Cleans up the Docker image pushed during deployment.
+      if: success() # Only run if terraform destroy was successful. Use always() to run regardless.
       run: |
-        IMAGE_PATH="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
-        if gcloud artifacts docker images list ${IMAGE_PATH} --include-tags --quiet >/dev/null 2>&1; then
-          gcloud artifacts docker images delete ${IMAGE_PATH}:latest --quiet
-        else
-          echo -e "\033[1;33mImage not found, skipping delete.\033[0m"
-        fi
+        set -e # Fail fast on errors
+        IMAGE_FULL_PATH="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO_NAME }}/${{ env.IMAGE_NAME }}"
+        echo "Attempting to delete Docker image tags for: $IMAGE_FULL_PATH"
+        
+        # Configure gcloud for the specific project for artifact commands
+        # This might be redundant if already configured, but ensures correct context.
+        gcloud auth configure-docker "${{ env.GCP_REGION }}-docker.pkg.dev" --project="${{ secrets.GCP_PROJECT_ID }}"
+
+        # List and delete specific tags (e.g., 'latest'). Add more tags if needed.
+        TAGS_TO_DELETE=("latest") 
+        for tag in "${TAGS_TO_DELETE[@]}"; do
+          # Check if the specific image tag exists
+          if gcloud artifacts docker images list "$IMAGE_FULL_PATH" --include-tags --filter="TAGS:$tag" --format="get(TAGS)" --project="${{ secrets.GCP_PROJECT_ID }}" | grep -q "$tag"; then
+            echo "Deleting tag: $tag from $IMAGE_FULL_PATH..."
+            gcloud artifacts docker images delete "$IMAGE_FULL_PATH:$tag" --quiet --delete-tags --project="${{ secrets.GCP_PROJECT_ID }}"
+            echo "Tag $tag deleted."
+          else
+            echo "Tag $tag not found for $IMAGE_FULL_PATH in project ${{ secrets.GCP_PROJECT_ID }}, skipping deletion."
+          fi
+        done
+        # Note: Deleting all tags might not delete the image manifest itself if untagged images are preserved by policy.
+        # For complete cleanup, deleting by digest might be necessary if all tags are removed.
+        # This script focuses on removing specific tags like 'latest'.
+      env:
+        GCP_REGION: ${{ secrets.GCP_REGION || env.GCP_REGION }}
+        DOCKER_REPO_NAME: ${{ secrets.DOCKER_REPO_NAME || env.DOCKER_REPO_NAME }}
+        IMAGE_NAME: ${{ secrets.IMAGE_NAME || env.IMAGE_NAME }}
