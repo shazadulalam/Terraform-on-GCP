@@ -151,12 +151,13 @@ Ensure your `terraform/terraform.tfvars` is correctly populated.
 The project is configured with GitHub Actions for automated deployment on pushes to the `main` branch.
 *   **Workflow:** `.github/workflows/deploy.yml`
 *   **Authentication:** Uses Workload Identity Federation to authenticate with GCP.
-*   **Secrets:** You need to configure the following secrets in your GitHub repository settings (refer to the comments in `.github/workflows/deploy.yml` for exact secret names like `GCP_PROJECT_ID`, `GCP_PROJECT_NUMBER`, `GCP_WIF_POOL_ID`, `GCP_WIF_PROVIDER_ID`, `GCP_SERVICE_ACCOUNT_EMAIL`):
-    *   `GCP_PROJECT_ID`: Your Google Cloud Project ID.
-    *   `GCP_PROJECT_NUMBER`: Your Google Cloud Project Number.
-    *   `GCP_WIF_POOL_ID`: Your Workload Identity Pool ID.
-    *   `GCP_WIF_PROVIDER_ID`: Your Workload Identity Pool Provider ID (associated with your GitHub repo).
-    *   `GCP_SERVICE_ACCOUNT_EMAIL`: The email of the GCP service account that GitHub Actions will impersonate. This service account must have the necessary permissions to deploy resources and be configured as a principal in the Workload Identity Pool.
+*   **Secrets:** You need to configure the following secrets in your GitHub repository settings (`Settings > Secrets and variables > Actions`):
+    *   `GCP_PROJECT_ID`: Your Google Cloud Project ID (e.g., `my-gcp-project-123`).
+    *   `GCP_WORKLOAD_IDENTITY_PROVIDER`: The full resource name of your Workload Identity Pool Provider. This is used by GitHub Actions to securely authenticate with Google Cloud.
+        *   Format: `projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/YOUR_POOL_ID/providers/YOUR_PROVIDER_ID`
+        *   Example: `projects/123456789012/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider`
+    *   `GCP_SERVICE_ACCOUNT_EMAIL`: The email of the GCP service account that GitHub Actions will impersonate. This service account must have the necessary permissions to manage resources defined in the Terraform configuration.
+        *   Example: `terraform-runner@my-gcp-project-123.iam.gserviceaccount.com`
 *   The workflow will build and push the Docker image and then run `terraform apply`.
 
 ## API Usage

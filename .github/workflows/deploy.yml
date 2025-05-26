@@ -31,8 +31,9 @@ jobs:
       uses: google-github-actions/auth@v2
       with:
         # The Workload Identity Provider resource name.
+        # This now uses a single secret GCP_WORKLOAD_IDENTITY_PROVIDER.
         # Format: projects/{project-number}/locations/global/workloadIdentityPools/{pool-id}/providers/{provider-id}
-        workload_identity_provider: 'projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ secrets.GCP_WIF_POOL_ID }}/providers/${{ secrets.GCP_WIF_PROVIDER_ID }}'
+        workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
         # The service account to impersonate.
         service_account: '${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}'
 
